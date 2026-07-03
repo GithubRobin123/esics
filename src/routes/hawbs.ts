@@ -4,6 +4,8 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { logger } from '../utils/logger';
 
 const toNumOrNull = (v: any) => (v !== '' && v !== null && v !== undefined ? Number(v) : null);
+// HAWB No and description must be stored in caps — CGM/transmission files are generated verbatim from these columns
+const upper = (v: any) => (v === null || v === undefined ? v : String(v).toUpperCase());
 
 const router = Router();
 router.use(authenticate);
@@ -110,6 +112,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(400).json({ message: 'Cannot add HAWB to a transmitted MAWB. Use Amend or Part to make changes.' });
       return;
     }
+    if (mawb.message_type === 'A') {
+      res.status(400).json({ message: 'Cannot add a new HAWB to an Amend file. Use Amend on an existing HAWB instead.' });
+      return;
+    }
 
     const dupCheck = await pool.query('SELECT id FROM hawbs WHERE hawb_no = $1', [hawb_no]);
     if (dupCheck.rows.length > 0) {
@@ -121,9 +127,9 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       `INSERT INTO hawbs (mawb_id, hawb_no, origin, destination, shipment_type,
         total_packages, gross_weight, item_description, profile_id, created_by, message_type)
        VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [mawb_id, hawb_no, origin || mawb.origin, destination || mawb.destination,
+      [mawb_id, upper(hawb_no), origin || mawb.origin, destination || mawb.destination,
        toNumOrNull(total_packages) || 0, toNumOrNull(gross_weight) || 0,
-       item_description || null, req.user?.profile_id, req.user?.id, mawb.message_type || 'F']
+       upper(item_description) || null, req.user?.profile_id, req.user?.id, mawb.message_type || 'F']
     );
     logger.info('HAWBS', `Created HAWB: ${hawb_no} in mawb_id=${mawb_id} by user=${req.user?.id}`);
     res.status(201).json(result.rows[0]);
@@ -155,6 +161,10 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
       res.status(400).json({ message: 'Cannot add HAWBs to a transmitted MAWB. Use Amend or Part to make changes.' });
       return;
     }
+    if (mawb.message_type === 'A') {
+      res.status(400).json({ message: 'Cannot add new HAWBs to an Amend file. Use Amend on an existing HAWB instead.' });
+      return;
+    }
 
     await client.query('BEGIN');
     const created = [];
@@ -170,9 +180,9 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
         `INSERT INTO hawbs (mawb_id, hawb_no, origin, destination, shipment_type,
           total_packages, gross_weight, item_description, profile_id, created_by, message_type)
          VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,$10) RETURNING *`,
-        [mawb_id, h.hawb_no, h.origin || mawb.origin, h.destination || mawb.destination,
+        [mawb_id, upper(h.hawb_no), h.origin || mawb.origin, h.destination || mawb.destination,
          toNumOrNull(h.total_packages) || 0, toNumOrNull(h.gross_weight) || 0,
-         h.item_description || null, req.user?.profile_id, req.user?.id, mawb.message_type || 'F']
+         upper(h.item_description) || null, req.user?.profile_id, req.user?.id, mawb.message_type || 'F']
       );
       created.push(r.rows[0]);
     }
@@ -196,9 +206,9 @@ router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
       `UPDATE hawbs SET hawb_no=$1, origin=$2, destination=$3,
        total_packages=$4, gross_weight=$5, item_description=$6, updated_at=NOW()
        WHERE id=$7 RETURNING *`,
-      [hawb_no, origin, destination,
+      [upper(hawb_no), origin, destination,
        toNumOrNull(total_packages) || 0, toNumOrNull(gross_weight) || 0,
-       item_description || null, req.params.id]
+       upper(item_description) || null, req.params.id]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -223,11 +233,11 @@ router.post('/amend/:id', async (req: AuthRequest, res: Response): Promise<void>
         total_packages, gross_weight, item_description, profile_id, created_by,
         message_type, parent_hawb_id)
        VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,'A',$10) RETURNING *`,
-      [mawb_id || h.mawb_id, h.hawb_no,
+      [mawb_id || h.mawb_id, upper(h.hawb_no),
        origin || h.origin, destination || h.destination,
        toNumOrNull(total_packages) !== null ? toNumOrNull(total_packages) : h.total_packages,
        toNumOrNull(gross_weight) !== null ? toNumOrNull(gross_weight) : parseFloat(h.gross_weight),
-       item_description !== undefined ? item_description : h.item_description,
+       upper(item_description !== undefined ? item_description : h.item_description),
        req.user?.profile_id, req.user?.id, h.id]
     );
     logger.info('HAWBS', `Amended HAWB id=${req.params.id} by user=${req.user?.id}`);

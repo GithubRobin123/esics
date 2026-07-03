@@ -139,8 +139,8 @@ router.post('/with-hawbs', async (req: AuthRequest, res: Response): Promise<void
   const incomingHawbs = Array.isArray(hawbs) ? hawbs : [];
   const preparedHawbs = incomingHawbs
     .map((row: any, index: number) => {
-      const hawbNo = String(row?.hawb_no || '').trim();
-      const itemDescription = String(row?.item_description || '').trim();
+      const hawbNo = String(row?.hawb_no || '').trim().toUpperCase();
+      const itemDescription = String(row?.item_description || '').trim().toUpperCase();
       const totalPackagesText = String(row?.total_packages ?? '').trim();
       const grossWeightText = String(row?.gross_weight ?? '').trim();
 
@@ -323,7 +323,8 @@ router.post('/amend/:id', async (req: AuthRequest, res: Response): Promise<void>
         message_type, parent_mawb_id, amendment_seq, status)
        VALUES ($1,$2,$3,$4,'T',$5,$6,'CONSOL',$7,$8,$9,$10,$11,$12,$13,'A',$14,$15,'draft') RETURNING *`,
       [newNo,
-       toDateOrNull(mawb_date || m.mawb_date), origin || m.origin, destination || m.destination,
+       // Amend date defaults to today (the amendment is a new file dated when it's filed)
+       toDateOrNull(mawb_date) || new Date().toISOString().slice(0, 10), origin || m.origin, destination || m.destination,
        toNumOrNull(total_packages) !== null ? toNumOrNull(total_packages) : m.total_packages,
        toNumOrNull(gross_weight) !== null ? toNumOrNull(gross_weight) : parseFloat(m.gross_weight),
        flight_no || m.flight_no || null, toDateOrNull(flight_origin_date || m.flight_origin_date),
@@ -413,13 +414,20 @@ router.post('/delete-copy/:id', async (req: AuthRequest, res: Response): Promise
 
 // Permanent Delete MAWB
 router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
+  const client = await pool.connect();
   try {
-    await pool.query('DELETE FROM mawbs WHERE id = $1', [req.params.id]);
+    await client.query('BEGIN');
+    await client.query('DELETE FROM transmissions WHERE mawb_id = $1', [req.params.id]);
+    await client.query('DELETE FROM mawbs WHERE id = $1', [req.params.id]);
+    await client.query('COMMIT');
     logger.info('MAWBS', `Deleted MAWB id=${req.params.id} by user=${req.user?.id}`);
     res.json({ message: 'Deleted' });
   } catch (err) {
+    await client.query('ROLLBACK');
     logger.error('MAWBS', `DELETE /${req.params.id} error`, err);
     res.status(500).json({ message: 'Server error' });
+  } finally {
+    client.release();
   }
 });
 

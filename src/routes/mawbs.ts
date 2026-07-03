@@ -8,6 +8,8 @@ router.use(authenticate);
 
 const toDateOrNull = (v: any) => (v && String(v).trim() !== '' ? v : null);
 const toNumOrNull = (v: any) => (v !== '' && v !== null && v !== undefined ? Number(v) : null);
+// Flight No. and IGM No. must be stored in caps — CGM/transmission files are generated verbatim from these columns
+const upper = (v: any) => (v === null || v === undefined ? v : String(v).toUpperCase());
 
 // Helper: get base MAWB number (strip -A1, -P2, -D3 suffixes)
 function getBaseNo(mawbNo: string): string {
@@ -292,8 +294,8 @@ router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
        WHERE id=$12 RETURNING *`,
       [toDateOrNull(mawb_date), origin, destination,
        toNumOrNull(total_packages) || 0, toNumOrNull(gross_weight) || 0,
-       flight_no || null, toDateOrNull(flight_origin_date),
-       igm_no || null, toDateOrNull(igm_date),
+       upper(flight_no) || null, toDateOrNull(flight_origin_date),
+       upper(igm_no) || null, toDateOrNull(igm_date),
        customs_house_code || null, profile_id || null, req.params.id]
     );
     res.json(result.rows[0]);
@@ -327,8 +329,8 @@ router.post('/amend/:id', async (req: AuthRequest, res: Response): Promise<void>
        toDateOrNull(mawb_date) || new Date().toISOString().slice(0, 10), origin || m.origin, destination || m.destination,
        toNumOrNull(total_packages) !== null ? toNumOrNull(total_packages) : m.total_packages,
        toNumOrNull(gross_weight) !== null ? toNumOrNull(gross_weight) : parseFloat(m.gross_weight),
-       flight_no || m.flight_no || null, toDateOrNull(flight_origin_date || m.flight_origin_date),
-       igm_no || m.igm_no || null, toDateOrNull(igm_date || m.igm_date),
+       upper(flight_no) || m.flight_no || null, toDateOrNull(flight_origin_date || m.flight_origin_date),
+       upper(igm_no) || m.igm_no || null, toDateOrNull(igm_date || m.igm_date),
        customs_house_code || m.customs_house_code || null,
        profile_id || m.profile_id || null, req.user?.id, m.id, seq]
     );
@@ -363,8 +365,8 @@ router.post('/part/:id', async (req: AuthRequest, res: Response): Promise<void> 
        toDateOrNull(mawb_date || m.mawb_date), origin || m.origin, destination || m.destination,
        toNumOrNull(total_packages) !== null ? toNumOrNull(total_packages) : m.total_packages,
        toNumOrNull(gross_weight) !== null ? toNumOrNull(gross_weight) : parseFloat(m.gross_weight),
-       flight_no || m.flight_no || null, toDateOrNull(flight_origin_date || m.flight_origin_date),
-       igm_no || m.igm_no || null, toDateOrNull(igm_date || m.igm_date),
+       upper(flight_no) || m.flight_no || null, toDateOrNull(flight_origin_date || m.flight_origin_date),
+       upper(igm_no) || m.igm_no || null, toDateOrNull(igm_date || m.igm_date),
        customs_house_code || m.customs_house_code || null,
        profile_id || m.profile_id || null, req.user?.id, m.id, seq]
     );
@@ -399,8 +401,8 @@ router.post('/delete-copy/:id', async (req: AuthRequest, res: Response): Promise
        toDateOrNull(mawb_date || m.mawb_date), origin || m.origin, destination || m.destination,
        toNumOrNull(total_packages) !== null ? toNumOrNull(total_packages) : m.total_packages,
        toNumOrNull(gross_weight) !== null ? toNumOrNull(gross_weight) : parseFloat(m.gross_weight),
-       flight_no || m.flight_no || null, toDateOrNull(flight_origin_date || m.flight_origin_date),
-       igm_no || m.igm_no || null, toDateOrNull(igm_date || m.igm_date),
+       upper(flight_no) || m.flight_no || null, toDateOrNull(flight_origin_date || m.flight_origin_date),
+       upper(igm_no) || m.igm_no || null, toDateOrNull(igm_date || m.igm_date),
        customs_house_code || m.customs_house_code || null,
        profile_id || m.profile_id || null, req.user?.id, m.id, seq]
     );
@@ -412,11 +414,22 @@ router.post('/delete-copy/:id', async (req: AuthRequest, res: Response): Promise
   }
 });
 
-// Permanent Delete MAWB
+// Permanent Delete MAWB — only allowed while still in draft (never transmitted)
 router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const existing = await client.query('SELECT status FROM mawbs WHERE id = $1 FOR UPDATE', [req.params.id]);
+    if (existing.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ message: 'MAWB not found' });
+      return;
+    }
+    if (existing.rows[0].status !== 'draft') {
+      await client.query('ROLLBACK');
+      res.status(400).json({ message: 'Cannot permanently delete a transmitted MAWB. Use Delete & Copy instead.' });
+      return;
+    }
     await client.query('DELETE FROM transmissions WHERE mawb_id = $1', [req.params.id]);
     await client.query('DELETE FROM mawbs WHERE id = $1', [req.params.id]);
     await client.query('COMMIT');

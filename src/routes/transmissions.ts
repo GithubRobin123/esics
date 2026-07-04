@@ -53,6 +53,13 @@ async function getNextControlNumber(userId: string, locationCode: string): Promi
 // Strip -A1/-P1/-D1 suffixes from MAWB/HAWB numbers for CGM output
 const stripSuffix = (no: string) => (no || '').replace(/-[APD]\d+$/, '').trim();
 
+const todayIso = () => new Date().toISOString().slice(0, 10);
+
+// Fresh MAWBs need no HAWB date (unchanged behavior). Part/Amend/Delete-copy MAWBs
+// (i.e. any MAWB with a parent_mawb_id) are required to carry a HAWB date — fall
+// back to today's date if one was never filled in from the UI.
+const resolveHawbDate = (hawbDate: any, isChildMawb: boolean) => hawbDate || (isChildMawb ? todayIso() : undefined);
+
 // Generate CGM file for a MAWB
 router.post('/generate-cgm/:mawbId', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -150,7 +157,7 @@ router.post('/generate-cgm/:mawbId', async (req: AuthRequest, res: Response): Pr
       flight_no: mawbRow.flight_no || '',
       flight_origin_date: mawbRow.flight_origin_date,
       mawb_no: baseMawbNo,
-      mawb_date: mawbRow.mawb_date,
+      mawb_date: mawbRow.mawb_date || resolveHawbDate(mawbRow.mawb_date, !!mawbRow.parent_mawb_id),
       origin: mawbRow.origin,
       destination: mawbRow.destination,
       shipment_type: 'T',
@@ -160,6 +167,7 @@ router.post('/generate-cgm/:mawbId', async (req: AuthRequest, res: Response): Pr
       message_type: mawbRow.message_type || 'F',
     };
 
+    const isChildMawb = !!mawbRow.parent_mawb_id;
     const hawbData: HawbData[] = hawbResult.rows.map((h: any) => ({
       carn_number: consolAgentId,
       customs_house_code: customsCode,
@@ -168,9 +176,9 @@ router.post('/generate-cgm/:mawbId', async (req: AuthRequest, res: Response): Pr
       flight_no: mawbRow.flight_no || '',
       flight_origin_date: mawbRow.flight_origin_date,
       mawb_no: baseMawbNo,
-      mawb_date: mawbRow.mawb_date,
+      mawb_date: mawbRow.mawb_date || resolveHawbDate(mawbRow.mawb_date, isChildMawb),
       hawb_no: stripSuffix(h.hawb_no),
-      hawb_date: h.hawb_date,
+      hawb_date: resolveHawbDate(h.hawb_date, isChildMawb),
       origin: h.origin,
       destination: h.destination,
       shipment_type: 'T',
@@ -281,12 +289,13 @@ router.get('/preview-cgm/:mawbId', async (req: AuthRequest, res: Response): Prom
       gross_weight: parseFloat(mawbRow.gross_weight),
       item_description: 'CONSOL', message_type: mawbRow.message_type || 'F',
     };
+    const isChildMawbP = !!mawbRow.parent_mawb_id;
     const hawbData: HawbData[] = hawbResult.rows.map((h: any) => ({
       carn_number: consolAgentId, customs_house_code: customsCode,
       igm_no: mawbRow.igm_no, igm_date: mawbRow.igm_date,
       flight_no: mawbRow.flight_no, flight_origin_date: mawbRow.flight_origin_date,
       mawb_no: baseMawbNo, mawb_date: mawbRow.mawb_date,
-      hawb_no: stripSuffix(h.hawb_no), hawb_date: h.hawb_date,
+      hawb_no: stripSuffix(h.hawb_no), hawb_date: resolveHawbDate(h.hawb_date, isChildMawbP),
       origin: h.origin, destination: h.destination,
       shipment_type: 'T', total_packages: h.total_packages,
       gross_weight: parseFloat(h.gross_weight),

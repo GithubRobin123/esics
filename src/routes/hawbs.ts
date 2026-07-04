@@ -4,6 +4,8 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { logger } from '../utils/logger';
 
 const toNumOrNull = (v: any) => (v !== '' && v !== null && v !== undefined ? Number(v) : null);
+const toDateOrNull = (v: any) => (v && String(v).trim() !== '' ? v : null);
+const today = () => new Date().toISOString().slice(0, 10);
 // HAWB No and description must be stored in caps — CGM/transmission files are generated verbatim from these columns
 const upper = (v: any) => (v === null || v === undefined ? v : String(v).toUpperCase());
 
@@ -98,13 +100,13 @@ router.get('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
 
 // Create single HAWB
 router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { mawb_id, hawb_no, origin, destination, total_packages, gross_weight, item_description } = req.body;
+  const { mawb_id, hawb_no, origin, destination, total_packages, gross_weight, item_description, hawb_date } = req.body;
   if (!mawb_id || !hawb_no || !origin || !destination) {
     res.status(400).json({ message: 'mawb_id, hawb_no, origin, destination required' });
     return;
   }
   try {
-    const mawbResult = await pool.query('SELECT message_type, origin, destination, status FROM mawbs WHERE id = $1', [mawb_id]);
+    const mawbResult = await pool.query('SELECT message_type, origin, destination, status, parent_mawb_id FROM mawbs WHERE id = $1', [mawb_id]);
     if (mawbResult.rows.length === 0) { res.status(404).json({ message: 'MAWB not found' }); return; }
     const mawb = mawbResult.rows[0];
 
@@ -123,13 +125,17 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       return;
     }
 
+    // Fresh HAWBs don't need a date; Part/Amend/Delete (child MAWBs) default to today if not given
+    const isChildMawb = !!mawb.parent_mawb_id;
+    const resolvedHawbDate = toDateOrNull(hawb_date) || (isChildMawb ? today() : null);
+
     const result = await pool.query(
       `INSERT INTO hawbs (mawb_id, hawb_no, origin, destination, shipment_type,
-        total_packages, gross_weight, item_description, profile_id, created_by, message_type)
-       VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,$10) RETURNING *`,
+        total_packages, gross_weight, item_description, profile_id, created_by, message_type, hawb_date)
+       VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [mawb_id, upper(hawb_no), origin || mawb.origin, destination || mawb.destination,
        toNumOrNull(total_packages) || 0, toNumOrNull(gross_weight) || 0,
-       upper(item_description) || null, req.user?.profile_id, req.user?.id, mawb.message_type || 'F']
+       upper(item_description) || null, req.user?.profile_id, req.user?.id, mawb.message_type || 'F', resolvedHawbDate]
     );
     logger.info('HAWBS', `Created HAWB: ${hawb_no} in mawb_id=${mawb_id} by user=${req.user?.id}`);
     res.status(201).json(result.rows[0]);
@@ -149,7 +155,7 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
   const client = await pool.connect();
   try {
     const mawbResult = await client.query(
-      'SELECT message_type, origin, destination, status FROM mawbs WHERE id = $1', [mawb_id]
+      'SELECT message_type, origin, destination, status, parent_mawb_id FROM mawbs WHERE id = $1', [mawb_id]
     );
     if (mawbResult.rows.length === 0) {
       res.status(404).json({ message: 'MAWB not found' });
@@ -166,6 +172,9 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
       return;
     }
 
+    // Fresh HAWBs don't need a date; Part/Amend/Delete (child MAWBs) default to today if not given
+    const isChildMawb = !!mawb.parent_mawb_id;
+
     await client.query('BEGIN');
     const created = [];
     for (const h of hawbs) {
@@ -176,13 +185,14 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
         res.status(400).json({ message: `HAWB number "${h.hawb_no}" already exists.` });
         return; // finally will release the client
       }
+      const resolvedHawbDate = toDateOrNull(h.hawb_date) || (isChildMawb ? today() : null);
       const r = await client.query(
         `INSERT INTO hawbs (mawb_id, hawb_no, origin, destination, shipment_type,
-          total_packages, gross_weight, item_description, profile_id, created_by, message_type)
-         VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,$10) RETURNING *`,
+          total_packages, gross_weight, item_description, profile_id, created_by, message_type, hawb_date)
+         VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
         [mawb_id, upper(h.hawb_no), h.origin || mawb.origin, h.destination || mawb.destination,
          toNumOrNull(h.total_packages) || 0, toNumOrNull(h.gross_weight) || 0,
-         upper(h.item_description) || null, req.user?.profile_id, req.user?.id, mawb.message_type || 'F']
+         upper(h.item_description) || null, req.user?.profile_id, req.user?.id, mawb.message_type || 'F', resolvedHawbDate]
       );
       created.push(r.rows[0]);
     }
@@ -200,15 +210,16 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
 
 // Edit HAWB (update existing, MAWB unchanged)
 router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { hawb_no, origin, destination, total_packages, gross_weight, item_description } = req.body;
+  const { hawb_no, origin, destination, total_packages, gross_weight, item_description, hawb_date } = req.body;
   try {
     const result = await pool.query(
       `UPDATE hawbs SET hawb_no=$1, origin=$2, destination=$3,
-       total_packages=$4, gross_weight=$5, item_description=$6, updated_at=NOW()
-       WHERE id=$7 RETURNING *`,
+       total_packages=$4, gross_weight=$5, item_description=$6,
+       hawb_date=COALESCE($7, hawb_date), updated_at=NOW()
+       WHERE id=$8 RETURNING *`,
       [upper(hawb_no), origin, destination,
        toNumOrNull(total_packages) || 0, toNumOrNull(gross_weight) || 0,
-       upper(item_description) || null, req.params.id]
+       upper(item_description) || null, toDateOrNull(hawb_date), req.params.id]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -218,6 +229,8 @@ router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
 });
 
 // Amend HAWB – creates new HAWB record with message_type='A' linked to amended MAWB
+// (also used to carry an existing HAWB into a Part or Delete-copy MAWB — always a
+// child MAWB, so the date defaults to today when not supplied from the UI)
 router.post('/amend/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const orig = await pool.query(
@@ -226,19 +239,20 @@ router.post('/amend/:id', async (req: AuthRequest, res: Response): Promise<void>
     );
     if (orig.rows.length === 0) { res.status(404).json({ message: 'HAWB not found' }); return; }
     const h = orig.rows[0];
-    const { mawb_id, origin, destination, total_packages, gross_weight, item_description } = req.body;
+    const { mawb_id, origin, destination, total_packages, gross_weight, item_description, hawb_date } = req.body;
+    const resolvedHawbDate = toDateOrNull(hawb_date) || toDateOrNull(h.hawb_date) || today();
 
     const result = await pool.query(
       `INSERT INTO hawbs (mawb_id, hawb_no, origin, destination, shipment_type,
         total_packages, gross_weight, item_description, profile_id, created_by,
-        message_type, parent_hawb_id)
-       VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,'A',$10) RETURNING *`,
+        message_type, parent_hawb_id, hawb_date)
+       VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,'A',$10,$11) RETURNING *`,
       [mawb_id || h.mawb_id, upper(h.hawb_no),
        origin || h.origin, destination || h.destination,
        toNumOrNull(total_packages) !== null ? toNumOrNull(total_packages) : h.total_packages,
        toNumOrNull(gross_weight) !== null ? toNumOrNull(gross_weight) : parseFloat(h.gross_weight),
        upper(item_description !== undefined ? item_description : h.item_description),
-       req.user?.profile_id, req.user?.id, h.id]
+       req.user?.profile_id, req.user?.id, h.id, resolvedHawbDate]
     );
     logger.info('HAWBS', `Amended HAWB id=${req.params.id} by user=${req.user?.id}`);
     res.status(201).json(result.rows[0]);

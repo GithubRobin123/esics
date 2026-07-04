@@ -1,7 +1,8 @@
 import { Router, Response } from 'express';
 import pool from '../db';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, requireRole, AuthRequest } from '../middleware/auth';
 import { logger } from '../utils/logger';
+import { INVOICE_SUPPLIER, INVOICE_BANK, INVOICE_SAC_CODE, numberToWordsINR } from '../utils/invoiceConstants';
 
 const router = Router();
 router.use(authenticate);
@@ -417,6 +418,186 @@ router.delete('/invoices/:id', async (req: AuthRequest, res: Response): Promise<
     await pool.query('DELETE FROM invoices WHERE id = $1', [req.params.id]);
     res.json({ message: 'Deleted' });
   } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ─── Air Invoice (auto-generated from the customer's profile billing plan) ────
+// A profile carries exactly one of: monthly_rate, per_mbl_rate, per_hbl_rate.
+// Generation sums the user's transmitted MAWB/HAWB activity for the chosen
+// period, applies the profile's GST rate, and always rounds the final total
+// UP to the next whole rupee (e.g. 849.60 -> 850.00).
+
+function roundUpToRupee(amount: number): { total: number; roundOff: number } {
+  const total = Math.ceil(amount - 1e-9); // epsilon guard against float noise
+  const roundOff = Math.round((total - amount) * 100) / 100;
+  return { total, roundOff };
+}
+
+async function findBillingProfile(userId: string): Promise<any> {
+  const r = await pool.query(
+    `SELECT * FROM profiles WHERE user_id = $1
+       AND (monthly_rate IS NOT NULL OR per_mbl_rate IS NOT NULL OR per_hbl_rate IS NOT NULL)
+     ORDER BY updated_at DESC NULLS LAST LIMIT 1`,
+    [userId]
+  );
+  return r.rows[0] || null;
+}
+
+async function nextInvoiceNo(): Promise<string> {
+  const r = await pool.query(
+    `SELECT COALESCE(MAX(invoice_no::int), 0) + 1 AS next
+     FROM invoices WHERE invoice_no ~ '^[0-9]+$'`
+  );
+  return String(r.rows[0].next).padStart(5, '0');
+}
+
+async function computeAirInvoice(userId: string, fromDate: string, toDate: string): Promise<any> {
+  const profile = await findBillingProfile(userId);
+  if (!profile) {
+    throw { status: 400, message: 'No billing rate (Monthly / Per MBL / Per HBL) is configured on any profile for this user.' };
+  }
+  const ratesSet = [profile.monthly_rate, profile.per_mbl_rate, profile.per_hbl_rate]
+    .filter((v: any) => v !== null && v !== undefined);
+  if (ratesSet.length !== 1) {
+    throw { status: 400, message: `Exactly one billing rate (Monthly / Per MBL / Per HBL) must be set on the profile — found ${ratesSet.length}.` };
+  }
+
+  const toDateEnd = `${toDate} 23:59:59`;
+  let rateType: string, quantity: number, rate: number, description: string;
+
+  if (profile.monthly_rate !== null && profile.monthly_rate !== undefined) {
+    rateType = 'monthly';
+    quantity = 1;
+    rate = Number(profile.monthly_rate);
+    description = 'AIR CONSOL MANIFEST - MONTHLY CHARGES';
+  } else if (profile.per_mbl_rate !== null && profile.per_mbl_rate !== undefined) {
+    rateType = 'mbl';
+    rate = Number(profile.per_mbl_rate);
+    const r = await pool.query(
+      `SELECT COUNT(*) FROM mawbs WHERE created_by = $1 AND transmission_date IS NOT NULL
+         AND transmission_date >= $2 AND transmission_date <= $3`,
+      [userId, fromDate, toDateEnd]
+    );
+    quantity = parseInt(r.rows[0].count);
+    description = 'AIR CONSOL MANIFEST (MBL)';
+  } else {
+    rateType = 'hbl';
+    rate = Number(profile.per_hbl_rate);
+    const r = await pool.query(
+      `SELECT COUNT(*) FROM hawbs h JOIN mawbs m ON h.mawb_id = m.id
+       WHERE m.created_by = $1 AND m.transmission_date IS NOT NULL
+         AND m.transmission_date >= $2 AND m.transmission_date <= $3`,
+      [userId, fromDate, toDateEnd]
+    );
+    quantity = parseInt(r.rows[0].count);
+    description = 'AIR CONSOL MANIFEST (HBL)';
+  }
+
+  const gstRate = Number(profile.gst_rate ?? 18);
+  const taxableAmount = Math.round(quantity * rate * 100) / 100;
+  const gstAmount = Math.round(taxableAmount * gstRate) / 100;
+  const beforeRound = Math.round((taxableAmount + gstAmount) * 100) / 100;
+  const { total, roundOff } = roundUpToRupee(beforeRound);
+
+  const buyer = {
+    company_name: profile.billing_company || profile.company_name,
+    address1: profile.address1 || '',
+    address2: profile.address2 || '',
+    billing_state: profile.billing_state || '',
+    gstin: profile.gstin || '',
+    email: profile.user_email || '',
+  };
+
+  return { profile_id: profile.id, rateType, quantity, rate, description, taxableAmount, gstRate, gstAmount, roundOff, total, buyer };
+}
+
+// Preview a would-be invoice without persisting anything
+router.get('/air-invoice/preview', requireRole(['master_admin', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { user_id, from_date, to_date } = req.query;
+    if (!user_id || !from_date || !to_date) {
+      res.status(400).json({ message: 'user_id, from_date and to_date are required' });
+      return;
+    }
+    const calc = await computeAirInvoice(String(user_id), String(from_date), String(to_date));
+    const suggestedInvoiceNo = await nextInvoiceNo();
+    res.json({
+      ...calc,
+      suggested_invoice_no: suggestedInvoiceNo,
+      invoice_date: new Date().toISOString().slice(0, 10),
+      period_from: from_date,
+      period_to: to_date,
+      supplier: INVOICE_SUPPLIER,
+      bank: INVOICE_BANK,
+      sac_code: INVOICE_SAC_CODE,
+      amount_in_words: numberToWordsINR(calc.total),
+    });
+  } catch (err: any) {
+    if (err?.status) { res.status(err.status).json({ message: err.message }); return; }
+    logger.error('REPORTS', 'GET /air-invoice/preview error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Persist the invoice (admin picks the final Invoice No. / Date, defaulting to the suggestion)
+router.post('/air-invoice/generate', requireRole(['master_admin', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { user_id, from_date, to_date, invoice_no, invoice_date } = req.body;
+    if (!user_id || !from_date || !to_date) {
+      res.status(400).json({ message: 'user_id, from_date and to_date are required' });
+      return;
+    }
+    const calc = await computeAirInvoice(user_id, from_date, to_date);
+    const finalInvoiceNo = (invoice_no && String(invoice_no).trim()) || await nextInvoiceNo();
+    const finalInvoiceDate = (invoice_date && String(invoice_date).trim()) || new Date().toISOString().slice(0, 10);
+
+    const result = await pool.query(
+      `INSERT INTO invoices (
+         invoice_no, invoice_date, amount, currency, description, status,
+         profile_id, created_by, user_id, period_from, period_to, rate_type,
+         quantity, rate, taxable_amount, gst_rate, gst_amount, round_off, total_amount, buyer_snapshot
+       ) VALUES ($1,$2,$3,'INR',$4,'pending',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       RETURNING *`,
+      [finalInvoiceNo, finalInvoiceDate, calc.total, calc.description,
+       calc.profile_id, req.user?.id, user_id, from_date, to_date, calc.rateType,
+       calc.quantity, calc.rate, calc.taxableAmount, calc.gstRate, calc.gstAmount,
+       calc.roundOff, calc.total, JSON.stringify(calc.buyer)]
+    );
+
+    logger.info('REPORTS', `Generated Air invoice ${finalInvoiceNo} for user=${user_id} (${from_date}..${to_date}) total=${calc.total}`);
+    res.status(201).json({
+      ...result.rows[0],
+      buyer: calc.buyer,
+      supplier: INVOICE_SUPPLIER,
+      bank: INVOICE_BANK,
+      sac_code: INVOICE_SAC_CODE,
+      amount_in_words: numberToWordsINR(calc.total),
+    });
+  } catch (err: any) {
+    if (err?.status) { res.status(err.status).json({ message: err.message }); return; }
+    if (err.code === '23505') { res.status(400).json({ message: 'Invoice number already exists' }); return; }
+    logger.error('REPORTS', 'POST /air-invoice/generate error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Fetch a previously generated Air invoice for reprinting
+router.get('/air-invoice/:id', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const result = await pool.query('SELECT * FROM invoices WHERE id = $1', [req.params.id]);
+    if (result.rows.length === 0) { res.status(404).json({ message: 'Invoice not found' }); return; }
+    const inv = result.rows[0];
+    res.json({
+      ...inv,
+      buyer: inv.buyer_snapshot,
+      supplier: INVOICE_SUPPLIER,
+      bank: INVOICE_BANK,
+      sac_code: INVOICE_SAC_CODE,
+      amount_in_words: numberToWordsINR(Number(inv.total_amount || inv.amount)),
+    });
+  } catch (err) {
+    logger.error('REPORTS', `GET /air-invoice/${req.params.id} error`, err);
     res.status(500).json({ message: 'Server error' });
   }
 });

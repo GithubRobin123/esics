@@ -79,6 +79,7 @@ async function upsertProfile(fields: any): Promise<{ created: boolean; row: any 
     address1, address2, gstin, billing_company, billing_state, gst_rate,
     pan_for_invoice, air_igm_rate, sea_consol_lcl_rate, sea_consol_fcl_rate,
     air_manifest_rate, air_manifest_min_bill,
+    monthly_rate, per_mbl_rate, per_hbl_rate,
   } = fields;
 
   // profile_code = user_prefix + location_code (unique per user+location)
@@ -91,9 +92,10 @@ async function upsertProfile(fields: any): Promise<{ created: boolean; row: any 
       pan_number, user_prefix, consol_agent_id, user_email,
       address1, address2, gstin, billing_company, billing_state, gst_rate,
       pan_for_invoice, air_igm_rate, sea_consol_lcl_rate, sea_consol_fcl_rate,
-      air_manifest_rate, air_manifest_min_bill, location_code
+      air_manifest_rate, air_manifest_min_bill, location_code,
+      monthly_rate, per_mbl_rate, per_hbl_rate
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
     )
     ON CONFLICT (user_id, location_code) DO NOTHING
     RETURNING *`,
@@ -105,6 +107,7 @@ async function upsertProfile(fields: any): Promise<{ created: boolean; row: any 
       billing_state || null, gst_rate || 18, pan_for_invoice || null,
       air_igm_rate || null, sea_consol_lcl_rate || null, sea_consol_fcl_rate || null,
       air_manifest_rate || null, air_manifest_min_bill || null, location_code || null,
+      monthly_rate || null, per_mbl_rate || null, per_hbl_rate || null,
     ]
   );
 
@@ -169,6 +172,7 @@ router.put('/:id', requireRole(['master_admin', 'admin']), async (req: AuthReque
     address1, address2, gstin, billing_company, billing_state, gst_rate,
     pan_for_invoice, air_igm_rate, sea_consol_lcl_rate, sea_consol_fcl_rate,
     air_manifest_rate, air_manifest_min_bill, location_code,
+    monthly_rate, per_mbl_rate, per_hbl_rate,
     user_id,
   } = req.body;
   try {
@@ -180,8 +184,9 @@ router.put('/:id', requireRole(['master_admin', 'admin']), async (req: AuthReque
         address1=$16, address2=$17, gstin=$18, billing_company=$19, billing_state=$20,
         gst_rate=$21, pan_for_invoice=$22, air_igm_rate=$23, sea_consol_lcl_rate=$24,
         sea_consol_fcl_rate=$25, air_manifest_rate=$26, air_manifest_min_bill=$27,
-        location_code=$28, updated_at=NOW()
-       WHERE id=$29 RETURNING *`,
+        location_code=$28, monthly_rate=$29, per_mbl_rate=$30, per_hbl_rate=$31,
+        updated_at=NOW()
+       WHERE id=$32 RETURNING *`,
       [company_name, address || null, city || null, state || null, country || 'India',
        phone || null, email || null, carn_number || null, customs_house_code || null, icegate_code || null,
        pan_number || null, user_prefix || null, consol_agent_id || null,
@@ -190,7 +195,8 @@ router.put('/:id', requireRole(['master_admin', 'admin']), async (req: AuthReque
        gst_rate || 18, pan_for_invoice || null,
        air_igm_rate || null, sea_consol_lcl_rate || null, sea_consol_fcl_rate || null,
        air_manifest_rate || null, air_manifest_min_bill || null,
-       location_code || null, req.params.id]
+       location_code || null, monthly_rate || null, per_mbl_rate || null, per_hbl_rate || null,
+       req.params.id]
     );
 
     if (user_id) {

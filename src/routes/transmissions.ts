@@ -391,11 +391,13 @@ router.get('/download/:id', async (req: AuthRequest, res: Response): Promise<voi
     const result = await pool.query('SELECT * FROM transmissions WHERE id = $1', [req.params.id]);
     if (result.rows.length === 0) { res.status(404).json({ message: 'File not found' }); return; }
     const t = result.rows[0];
-    // application/octet-stream (not text/plain) — Android/Chrome maps text/plain to
-    // .txt and renames the download (e.g. "FILE.cgm" -> "FILE.cgm.txt") since .cgm
-    // isn't a registered extension for that MIME type. octet-stream has no such
-    // mapping, so the given filename/extension is kept as-is on mobile.
-    res.setHeader('Content-Type', 'application/octet-stream');
+    // A custom, non-standard MIME type — NOT text/plain or application/octet-stream.
+    // Both of those are in the browser's MIME-sniffing set (whatwg.org/mimesniff),
+    // meaning Chrome inspects the actual bytes and, since CGM content is plain
+    // ASCII, relabels it text/plain anyway — which is what caused Android/WhatsApp
+    // to rename "FILE.cgm" to "FILE.cgm.txt". A made-up application/x-* type is
+    // never sniffed and has no registered extension, so the filename stays as-is.
+    res.setHeader('Content-Type', 'application/x-ices-manifest');
     res.setHeader('Content-Disposition', `attachment; filename="${t.file_name}"`);
     res.send(t.file_content || '');
   } catch (err) {

@@ -208,8 +208,8 @@ router.post('/transmit/:flightId', async (req: AuthRequest, res: Response): Prom
 
     await pool.query('UPDATE igm_flights SET status=$1, transmitted_at=NOW() WHERE id=$2', ['transmitted', req.params.flightId]);
 
-    // application/octet-stream — avoids mobile browsers renaming the file to .txt
-    res.setHeader('Content-Type', 'application/octet-stream');
+    // Custom non-sniffable MIME type — see comment in transmissions.ts's /download/:id
+    res.setHeader('Content-Type', 'application/x-ices-manifest');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.send(fileContent);
   } catch (err) {

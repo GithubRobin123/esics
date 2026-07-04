@@ -280,7 +280,10 @@ router.get('/download-files/:id', async (req: AuthRequest, res: Response): Promi
     const result = await pool.query('SELECT * FROM transmissions WHERE id = $1', [req.params.id]);
     if (result.rows.length === 0) { res.status(404).json({ message: 'File not found' }); return; }
     const t = result.rows[0];
-    res.setHeader('Content-Type', 'text/plain');
+    // application/octet-stream — avoids mobile browsers renaming .cgm to .cgm.txt
+    // (text/plain is registered to .txt in Android's MIME table; octet-stream isn't
+    // mapped to any extension, so the given filename is kept as-is).
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${t.file_name}"`);
     res.send(t.file_content || '');
   } catch (err) {

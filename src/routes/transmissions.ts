@@ -391,7 +391,11 @@ router.get('/download/:id', async (req: AuthRequest, res: Response): Promise<voi
     const result = await pool.query('SELECT * FROM transmissions WHERE id = $1', [req.params.id]);
     if (result.rows.length === 0) { res.status(404).json({ message: 'File not found' }); return; }
     const t = result.rows[0];
-    res.setHeader('Content-Type', 'text/plain');
+    // application/octet-stream (not text/plain) — Android/Chrome maps text/plain to
+    // .txt and renames the download (e.g. "FILE.cgm" -> "FILE.cgm.txt") since .cgm
+    // isn't a registered extension for that MIME type. octet-stream has no such
+    // mapping, so the given filename/extension is kept as-is on mobile.
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${t.file_name}"`);
     res.send(t.file_content || '');
   } catch (err) {

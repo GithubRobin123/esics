@@ -3,19 +3,26 @@
  * These never change per-customer — only the buyer (customer profile) side does.
  */
 
+
+// Building No./Flat No.: PLOT NO-3512 
+// Road/Street: MAHARANA PRATAP COLONY,
+//  AGWANPUR Nearby Landmark: NEAR MILAN RESTAURANT 
+// City/Town/Village: Palwal District: Palwal
+//  State: Haryana PIN Code: 121102
+
 export const INVOICE_SUPPLIER = {
-  name: 'EDI Software Solutions',
-  addressLines: ['House No 44', 'Lohina Palwal 121106'],
-  mobile: '9813603030',
-  gstin: '06ASLPJ8726H1ZF',
+  name: 'EDI Manifest Solutions',
+  addressLines: ['PLOT NO-3512', 'MAHARANA PRATAP COLONY', 'Palwal 121102'],
+  mobile: '8882741223',
+  gstin: '06CVRPD3667A1ZN',
   email: 'bills@ediss.in',
 };
 
 export const INVOICE_BANK = {
-  accountName: 'EDI SOFTWARE SOLUTIONS',
-  accountNo: '50200082782142',
-  ifsc: 'HDFC0001734',
-  branch: 'Hodal',
+  accountName: 'EDI MANIFEST SOLUTIONS',
+  accountNo: '50200083752941',
+  ifsc: 'HDFC0000459',
+  branch: 'PALWAL - HARYANA',
 };
 
 export const INVOICE_SAC_CODE = '998439';

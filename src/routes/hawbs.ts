@@ -8,6 +8,8 @@ const toDateOrNull = (v: any) => (v && String(v).trim() !== '' ? v : null);
 const today = () => new Date().toISOString().slice(0, 10);
 // HAWB No and description must be stored in caps — CGM/transmission files are generated verbatim from these columns
 const upper = (v: any) => (v === null || v === undefined ? v : String(v).toUpperCase());
+// Port of Origin: 1-3 alphanumeric characters (letters and digits both allowed)
+const PORT_CODE_RE = /^[A-Za-z0-9]{1,3}$/;
 
 const router = Router();
 router.use(authenticate);
@@ -105,6 +107,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     res.status(400).json({ message: 'mawb_id, hawb_no, origin, destination required' });
     return;
   }
+  if (!PORT_CODE_RE.test(origin)) {
+    res.status(400).json({ message: 'Port of Origin must be 1-3 alphanumeric characters.' });
+    return;
+  }
   try {
     const mawbResult = await pool.query('SELECT message_type, origin, destination, status, parent_mawb_id FROM mawbs WHERE id = $1', [mawb_id]);
     if (mawbResult.rows.length === 0) { res.status(404).json({ message: 'MAWB not found' }); return; }
@@ -116,12 +122,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
     if (mawb.message_type === 'A') {
       res.status(400).json({ message: 'Cannot add a new HAWB to an Amend file. Use Amend on an existing HAWB instead.' });
-      return;
-    }
-
-    const dupCheck = await pool.query('SELECT id FROM hawbs WHERE hawb_no = $1', [hawb_no]);
-    if (dupCheck.rows.length > 0) {
-      res.status(400).json({ message: `HAWB number "${hawb_no}" already exists. House numbers must be globally unique.` });
       return;
     }
 
@@ -179,10 +179,10 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
     const created = [];
     for (const h of hawbs) {
       if (!h.hawb_no || String(h.hawb_no).trim() === '') continue;
-      const dup = await client.query('SELECT id FROM hawbs WHERE hawb_no = $1', [h.hawb_no]);
-      if (dup.rows.length > 0) {
+      const rowOrigin = h.origin || mawb.origin;
+      if (!PORT_CODE_RE.test(rowOrigin)) {
         await client.query('ROLLBACK');
-        res.status(400).json({ message: `HAWB number "${h.hawb_no}" already exists.` });
+        res.status(400).json({ message: `Port of Origin "${rowOrigin}" must be 1-3 alphanumeric characters.` });
         return; // finally will release the client
       }
       const resolvedHawbDate = toDateOrNull(h.hawb_date) || (isChildMawb ? today() : null);
@@ -211,6 +211,10 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
 // Edit HAWB (update existing, MAWB unchanged)
 router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   const { hawb_no, origin, destination, total_packages, gross_weight, item_description, hawb_date } = req.body;
+  if (origin && !PORT_CODE_RE.test(origin)) {
+    res.status(400).json({ message: 'Port of Origin must be 1-3 alphanumeric characters.' });
+    return;
+  }
   try {
     const result = await pool.query(
       `UPDATE hawbs SET hawb_no=$1, origin=$2, destination=$3,

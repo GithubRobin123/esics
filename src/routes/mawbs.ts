@@ -10,6 +10,8 @@ const toDateOrNull = (v: any) => (v && String(v).trim() !== '' ? v : null);
 const toNumOrNull = (v: any) => (v !== '' && v !== null && v !== undefined ? Number(v) : null);
 // Flight No. and IGM No. must be stored in caps — CGM/transmission files are generated verbatim from these columns
 const upper = (v: any) => (v === null || v === undefined ? v : String(v).toUpperCase());
+// Port of Origin: 1-3 alphanumeric characters (letters and digits both allowed)
+const PORT_CODE_RE = /^[A-Za-z0-9]{1,3}$/;
 
 // Helper: get base MAWB number (strip -A1, -P2, -D3 suffixes)
 function getBaseNo(mawbNo: string): string {
@@ -138,6 +140,11 @@ router.post('/with-hawbs', async (req: AuthRequest, res: Response): Promise<void
     return;
   }
 
+  if (!PORT_CODE_RE.test(origin)) {
+    res.status(400).json({ message: 'Port of Origin must be 1-3 alphanumeric characters.' });
+    return;
+  }
+
   const incomingHawbs = Array.isArray(hawbs) ? hawbs : [];
   const preparedHawbs = incomingHawbs
     .map((row: any, index: number) => {
@@ -159,7 +166,6 @@ router.post('/with-hawbs', async (req: AuthRequest, res: Response): Promise<void
     })
     .filter((row: any) => row.hasData);
 
-  const seenHawbs = new Set<string>();
   for (const row of preparedHawbs) {
     if (!row.hawb_no) {
       res.status(400).json({ message: `HAWB number is required for row ${row.rowNo}.` });
@@ -169,13 +175,6 @@ router.post('/with-hawbs', async (req: AuthRequest, res: Response): Promise<void
       res.status(400).json({ message: `Origin and destination are required for HAWB row ${row.rowNo}.` });
       return;
     }
-
-    const hawbKey = row.hawb_no.toUpperCase();
-    if (seenHawbs.has(hawbKey)) {
-      res.status(400).json({ message: `Duplicate HAWB number "${row.hawb_no}" in the same save request.` });
-      return;
-    }
-    seenHawbs.add(hawbKey);
   }
 
   const client = await pool.connect();
@@ -207,14 +206,6 @@ router.post('/with-hawbs', async (req: AuthRequest, res: Response): Promise<void
     const createdHawbs: any[] = [];
 
     for (const row of preparedHawbs) {
-      const existingHawb = await client.query('SELECT id FROM hawbs WHERE hawb_no = $1', [row.hawb_no]);
-      if (existingHawb.rows.length > 0) {
-        await client.query('ROLLBACK');
-        transactionStarted = false;
-        res.status(400).json({ message: `HAWB number "${row.hawb_no}" already exists.` });
-        return;
-      }
-
       const hawbResult = await client.query(
         `INSERT INTO hawbs (mawb_id, hawb_no, origin, destination, shipment_type,
           total_packages, gross_weight, item_description, profile_id, created_by, message_type)
@@ -256,6 +247,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     res.status(400).json({ message: 'MAWB number must contain digits only' });
     return;
   }
+  if (!PORT_CODE_RE.test(origin)) {
+    res.status(400).json({ message: 'Port of Origin must be 1-3 alphanumeric characters.' });
+    return;
+  }
   try {
     // Enforce unique MAWB number
     const existing = await pool.query('SELECT id FROM mawbs WHERE mawb_no = $1', [mawb_no]);
@@ -284,6 +279,10 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   const { mawb_date, origin, destination, total_packages, gross_weight,
     flight_no, flight_origin_date, igm_no, igm_date, customs_house_code, profile_id } = req.body;
+  if (origin && !PORT_CODE_RE.test(origin)) {
+    res.status(400).json({ message: 'Port of Origin must be 1-3 alphanumeric characters.' });
+    return;
+  }
   try {
     const result = await pool.query(
       `UPDATE mawbs SET mawb_date=$1, origin=$2, destination=$3,

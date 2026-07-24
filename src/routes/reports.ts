@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
 import pool from '../db';
+import invoicesPool from '../invoicesDb';
 import { authenticate, requireRole, AuthRequest } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import { INVOICE_SUPPLIER, INVOICE_BANK, INVOICE_SAC_CODE, numberToWordsINR } from '../utils/invoiceConstants';
@@ -365,12 +366,21 @@ router.delete('/can-do/:id', async (req: AuthRequest, res: Response): Promise<vo
 router.get('/invoices', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { status } = req.query;
-    let query = `SELECT i.*, u.username as created_by_name FROM invoices i LEFT JOIN users u ON i.created_by = u.id WHERE 1=1`;
+    let query = `SELECT * FROM invoices WHERE module = 'air'`;
     const params: any[] = [];
-    if (status) { query += ' AND i.status = $1'; params.push(status); }
-    query += ' ORDER BY i.created_at DESC LIMIT 200';
-    const result = await pool.query(query, params);
-    res.json(result.rows);
+    if (status) { query += ' AND status = $1'; params.push(status); }
+    query += ' ORDER BY created_at DESC LIMIT 200';
+    const result = await invoicesPool.query(query, params);
+
+    // invoices now live in a separate database from `users`, so resolve
+    // created_by_name with a second lookup instead of a SQL join.
+    const userIds = [...new Set(result.rows.map((r) => r.created_by).filter(Boolean))];
+    const namesById: Record<string, string> = {};
+    if (userIds.length > 0) {
+      const usersResult = await pool.query('SELECT id, username FROM users WHERE id = ANY($1)', [userIds]);
+      for (const u of usersResult.rows) namesById[u.id] = u.username;
+    }
+    res.json(result.rows.map((r) => ({ ...r, created_by_name: namesById[r.created_by] || null })));
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -385,10 +395,10 @@ router.post('/invoices', async (req: AuthRequest, res: Response): Promise<void> 
   }
   const toD = (v: any) => (v && String(v).trim() !== '' ? v : null);
   try {
-    const result = await pool.query(
-      `INSERT INTO invoices (invoice_no, invoice_date, mawb_no, hawb_no, consignee_name,
+    const result = await invoicesPool.query(
+      `INSERT INTO invoices (module, invoice_no, invoice_date, mawb_no, hawb_no, consignee_name,
         amount, currency, description, profile_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+       VALUES ('air',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [invoice_no, toD(invoice_date), mawb_no || null, hawb_no || null, consignee_name || null,
        amount || 0, currency || 'INR', description || null, req.user?.profile_id, req.user?.id]
     );
@@ -404,10 +414,10 @@ router.put('/invoices/:id', async (req: AuthRequest, res: Response): Promise<voi
     amount, currency, description, status } = req.body;
   const toD = (v: any) => (v && String(v).trim() !== '' ? v : null);
   try {
-    const result = await pool.query(
+    const result = await invoicesPool.query(
       `UPDATE invoices SET invoice_no=$1, invoice_date=$2, mawb_no=$3, hawb_no=$4,
        consignee_name=$5, amount=$6, currency=$7, description=$8, status=$9, updated_at=NOW()
-       WHERE id=$10 RETURNING *`,
+       WHERE id=$10 AND module='air' RETURNING *`,
       [invoice_no, toD(invoice_date), mawb_no || null, hawb_no || null, consignee_name || null,
        amount || 0, currency || 'INR', description || null, status || 'pending', req.params.id]
     );
@@ -419,7 +429,7 @@ router.put('/invoices/:id', async (req: AuthRequest, res: Response): Promise<voi
 
 router.delete('/invoices/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    await pool.query('DELETE FROM invoices WHERE id = $1', [req.params.id]);
+    await invoicesPool.query(`DELETE FROM invoices WHERE id = $1 AND module='air'`, [req.params.id]);
     res.json({ message: 'Deleted' });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -448,12 +458,13 @@ async function findBillingProfile(userId: string): Promise<any> {
   return r.rows[0] || null;
 }
 
+// Invoice numbers are allocated from a single shared Postgres sequence
+// (`invoice_no_seq`, in the shared invoices database) so numbers issued by
+// the air and sea backends never collide — atomic regardless of which
+// process calls it, unlike the old MAX(invoice_no)+1 approach.
 async function nextInvoiceNo(): Promise<string> {
-  const r = await pool.query(
-    `SELECT COALESCE(MAX(invoice_no::int), 0) + 1 AS next
-     FROM invoices WHERE invoice_no ~ '^[0-9]+$'`
-  );
-  return String(r.rows[0].next).padStart(5, '0');
+  const r = await invoicesPool.query(`SELECT nextval('invoice_no_seq') AS n`);
+  return String(r.rows[0].n).padStart(5, '0');
 }
 
 async function computeAirInvoice(userId: string, fromDate: string, toDate: string): Promise<any> {
@@ -556,12 +567,12 @@ router.post('/air-invoice/generate', requireRole(['master_admin', 'admin']), asy
     const finalInvoiceNo = (invoice_no && String(invoice_no).trim()) || await nextInvoiceNo();
     const finalInvoiceDate = (invoice_date && String(invoice_date).trim()) || new Date().toISOString().slice(0, 10);
 
-    const result = await pool.query(
+    const result = await invoicesPool.query(
       `INSERT INTO invoices (
-         invoice_no, invoice_date, amount, currency, description, status,
+         module, invoice_no, invoice_date, amount, currency, description, status,
          profile_id, created_by, user_id, period_from, period_to, rate_type,
          quantity, rate, taxable_amount, gst_rate, gst_amount, round_off, total_amount, buyer_snapshot
-       ) VALUES ($1,$2,$3,'INR',$4,'pending',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       ) VALUES ('air',$1,$2,$3,'INR',$4,'pending',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        RETURNING *`,
       [finalInvoiceNo, finalInvoiceDate, calc.total, calc.description,
        calc.profile_id, req.user?.id, user_id, from_date, to_date, calc.rateType,
@@ -589,7 +600,7 @@ router.post('/air-invoice/generate', requireRole(['master_admin', 'admin']), asy
 // Fetch a previously generated Air invoice for reprinting
 router.get('/air-invoice/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const result = await pool.query('SELECT * FROM invoices WHERE id = $1', [req.params.id]);
+    const result = await invoicesPool.query(`SELECT * FROM invoices WHERE id = $1 AND module='air'`, [req.params.id]);
     if (result.rows.length === 0) { res.status(404).json({ message: 'Invoice not found' }); return; }
     const inv = result.rows[0];
     res.json({

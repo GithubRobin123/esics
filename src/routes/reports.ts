@@ -169,7 +169,8 @@ router.get('/consol-statement', async (req: AuthRequest, res: Response): Promise
     const { from_date, to_date, user_id } = req.query;
     const exportAll = req.query.export === 'true';
     const page     = Math.max(1, parseInt(String(req.query.page     || '1')));
-    const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query.pageSize || '25'))));
+    // Statement by Consol supports up to 1000 rows per page (higher than the usual 100 cap on other reports)
+    const pageSize = Math.min(1000, Math.max(1, parseInt(String(req.query.pageSize || '25'))));
 
     const params: any[] = [];
     let filters = '';

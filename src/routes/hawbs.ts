@@ -120,10 +120,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
       res.status(400).json({ message: 'Cannot add HAWB to a transmitted MAWB. Use Amend or Part to make changes.' });
       return;
     }
-    if (mawb.message_type === 'A') {
-      res.status(400).json({ message: 'Cannot add a new HAWB to an Amend file. Use Amend on an existing HAWB instead.' });
-      return;
-    }
 
     // Fresh HAWBs don't need a date; Part/Amend/Delete (child MAWBs) default to today if not given
     const isChildMawb = !!mawb.parent_mawb_id;
@@ -165,10 +161,6 @@ router.post('/batch', async (req: AuthRequest, res: Response): Promise<void> => 
 
     if (mawb.status !== 'draft') {
       res.status(400).json({ message: 'Cannot add HAWBs to a transmitted MAWB. Use Amend or Part to make changes.' });
-      return;
-    }
-    if (mawb.message_type === 'A') {
-      res.status(400).json({ message: 'Cannot add new HAWBs to an Amend file. Use Amend on an existing HAWB instead.' });
       return;
     }
 

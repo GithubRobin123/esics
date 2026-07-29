@@ -224,9 +224,11 @@ router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   }
 });
 
-// Amend HAWB – creates new HAWB record with message_type='A' linked to amended MAWB
-// (also used to carry an existing HAWB into a Part or Delete-copy MAWB — always a
-// child MAWB, so the date defaults to today when not supplied from the UI)
+// Amend HAWB – creates new HAWB record linked to a child MAWB (Amend/Part/Delete-copy).
+// This endpoint is reused to carry an existing HAWB into any of those three. It always
+// defaults to message_type='A' (unchanged, original behavior for Amend/Part) EXCEPT when
+// the target MAWB is a Delete-copy (-D), in which case the carried HAWB must also be 'D' —
+// otherwise it wrongly ends up tagged 'A' in the generated CGM file instead of 'D'.
 router.post('/amend/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const orig = await pool.query(
@@ -238,19 +240,23 @@ router.post('/amend/:id', async (req: AuthRequest, res: Response): Promise<void>
     const { mawb_id, origin, destination, total_packages, gross_weight, item_description, hawb_date } = req.body;
     const resolvedHawbDate = toDateOrNull(hawb_date) || toDateOrNull(h.hawb_date) || today();
 
+    const targetMawbId = mawb_id || h.mawb_id;
+    const targetMawb = await pool.query('SELECT message_type FROM mawbs WHERE id = $1', [targetMawbId]);
+    const targetMessageType = targetMawb.rows[0]?.message_type === 'D' ? 'D' : 'A';
+
     const result = await pool.query(
       `INSERT INTO hawbs (mawb_id, hawb_no, origin, destination, shipment_type,
         total_packages, gross_weight, item_description, profile_id, created_by,
         message_type, parent_hawb_id, hawb_date)
-       VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,'A',$10,$11) RETURNING *`,
-      [mawb_id || h.mawb_id, upper(h.hawb_no),
+       VALUES ($1,$2,$3,$4,'T',$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [targetMawbId, upper(h.hawb_no),
        origin || h.origin, destination || h.destination,
        toNumOrNull(total_packages) !== null ? toNumOrNull(total_packages) : h.total_packages,
        toNumOrNull(gross_weight) !== null ? toNumOrNull(gross_weight) : parseFloat(h.gross_weight),
        upper(item_description !== undefined ? item_description : h.item_description),
-       req.user?.profile_id, req.user?.id, h.id, resolvedHawbDate]
+       req.user?.profile_id, req.user?.id, targetMessageType, h.id, resolvedHawbDate]
     );
-    logger.info('HAWBS', `Amended HAWB id=${req.params.id} by user=${req.user?.id}`);
+    logger.info('HAWBS', `Amended HAWB id=${req.params.id} by user=${req.user?.id} → mawb_id=${targetMawbId} message_type=${targetMessageType}`);
     res.status(201).json(result.rows[0]);
   } catch (err) {
     logger.error('HAWBS', `POST /amend/${req.params.id} error`, err);

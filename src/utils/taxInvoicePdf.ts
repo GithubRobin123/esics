@@ -243,10 +243,11 @@ function drawInvoice(doc: PDFKit.PDFDocument, inv: PdfInvoice): void {
   let by = doc.y + 2;
   doc.font('Helvetica').fontSize(9);
   for (const line of [
-    `Account Name: ${INVOICE_BANK.accountName}`,
+    `Account Holder: ${INVOICE_BANK.accountName}`,
     `Account No: ${INVOICE_BANK.accountNo}`,
     `IFSC: ${INVOICE_BANK.ifsc}`,
     `Branch: ${INVOICE_BANK.branch}`,
+    `Account Type: ${INVOICE_BANK.accountType}`,
   ]) {
     doc.text(line, PAGE_MARGIN, by, { width: CONTENT_W * 0.55 });
     by = doc.y;

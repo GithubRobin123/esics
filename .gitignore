@@ -3,3 +3,5 @@ dist
 build
 .env
 *.log
+# tax invoice self-test sample output
+selftest-invoice.*

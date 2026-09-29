@@ -231,10 +231,11 @@ export async function renderInvoiceExcel(inv: PdfInvoice): Promise<Buffer> {
 
   // ─── Bank + footer ─────────────────────────────────────────────────────────
   leftRow('Bank Details', true);
-  leftRow(`Account Name: ${INVOICE_BANK.accountName}`);
+  leftRow(`Account Holder: ${INVOICE_BANK.accountName}`);
   leftRow(`Account No: ${INVOICE_BANK.accountNo}`);
   leftRow(`IFSC: ${INVOICE_BANK.ifsc}`);
   leftRow(`Branch: ${INVOICE_BANK.branch}`);
+  leftRow(`Account Type: ${INVOICE_BANK.accountType}`);
   r++;
 
   if (inv.notes && String(inv.notes).trim()) {

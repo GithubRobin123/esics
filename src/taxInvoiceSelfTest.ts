@@ -1,5 +1,6 @@
 /* Temporary self-test for the tax invoice module. Deleted after running. */
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { computeTaxInvoice, resolveGstMode, formatInvoiceNo, financialYear, round2 } from './utils/taxInvoiceCalc';
 import { renderInvoicePdf } from './utils/taxInvoicePdf';
@@ -108,7 +109,8 @@ check('formatted', formatInvoiceNo(42, new Date('2026-09-29')), 'EMS/2026-27/000
     notes: 'Payable within 15 days.',
   };
 
-  const outDir = process.env.SELFTEST_OUT || '.';
+  // Sample files go to the OS temp folder so they never end up in the repo.
+  const outDir = process.env.SELFTEST_OUT || os.tmpdir();
   console.log('\n--- Renderers ---');
 
   const pdf = await renderInvoicePdf(sample);

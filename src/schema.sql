@@ -138,7 +138,8 @@ INSERT INTO locations (iata_code, city_name, country) VALUES
   ('BKK', 'Bangkok Suvarnabhumi', 'Thailand'),
   ('KUL', 'Kuala Lumpur', 'Malaysia'),
   ('DUS', 'Dusseldorf', 'Germany'),
-  ('KOL', 'Kolkata (alt code)', 'India')
+  ('KOL', 'Kolkata (alt code)', 'India'),
+  ('NMI', 'NAVI MUMBAI', 'India')
 ON CONFLICT (iata_code) DO NOTHING;
 
 -- Insert default master admin profile

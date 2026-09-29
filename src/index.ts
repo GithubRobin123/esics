@@ -16,6 +16,7 @@ import locationRoutes from './routes/locations';
 import igmRoutes from './routes/igm';
 import egmRoutes from './routes/egm';
 import reportsRoutes from './routes/reports';
+import taxInvoiceRoutes from './routes/taxInvoices';
 import path from 'path/win32';
 import { logger, sanitizeBody } from './utils/logger';
 import { applyAppEnv } from './utils/env';
@@ -79,6 +80,7 @@ app.use('/api/locations', locationRoutes);
 app.use('/api/igm', igmRoutes);
 app.use('/api/egm', egmRoutes);
 app.use('/api/reports', reportsRoutes);
+app.use('/api/tax-invoices', taxInvoiceRoutes);
 
 // 404 handler
 app.use((req: express.Request, res: express.Response) => {

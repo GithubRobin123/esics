@@ -71,10 +71,19 @@ async function main() {
     name: TEST_PARTY, gstin: '27AABCU9603R1ZX',
     address1: 'Plot 14, Sector 19', city: 'Navi Mumbai', state: 'Maharashtra', pincode: '400705',
     email: 'e2e@example.com', phone: '9999999999',
+    rate_basis: 'hawb', rate: 150,
   });
   ok('create party', mkParty.status === 201, `status ${mkParty.status}`);
   created.partyId = mkParty.body?.id;
   ok('state code derived from GSTIN', mkParty.body?.state_code === '27', `got ${mkParty.body?.state_code}`);
+  ok('party billing rate stored', mkParty.body?.rate_basis === 'hawb' && mkParty.body?.rate === 150,
+    `${mkParty.body?.rate_basis} ${mkParty.body?.rate}`);
+
+  const badBasis = await call('POST', '/parties', { name: 'bad', state_code: '27', rate_basis: 'monthly', rate: 1 });
+  ok('unknown rate basis rejected', badBasis.status === 400, `status ${badBasis.status}`);
+
+  const basisNoRate = await call('POST', '/parties', { name: 'bad', state_code: '27', rate_basis: 'mawb' });
+  ok('rate basis without a rate rejected', basisNoRate.status === 400, `status ${basisNoRate.status}`);
 
   const badGstin = await call('POST', '/parties', { name: 'bad', gstin: 'NOPE' });
   ok('invalid GSTIN rejected', badGstin.status === 400, `status ${badGstin.status}`);
@@ -88,6 +97,21 @@ async function main() {
   const n2 = await call('GET', '/next-number');
   ok('next-number returns a formatted number', /^EMS\/\d{4}-\d{2}\/\d{5}$/.test(n1.body?.invoice_no), n1.body?.invoice_no);
   ok('preview does not consume the number', n1.body?.invoice_no === n2.body?.invoice_no);
+
+  const nb = await call('GET', '/numbering');
+  ok('numbering reachable (not shadowed by /:id)', nb.status === 200, `status ${nb.status}`);
+  ok('numbering agrees with next-number', nb.body?.next_invoice_no === n1.body?.invoice_no, nb.body?.next_invoice_no);
+
+  const zeroStart = await call('PUT', '/numbering', { next_number: 0 });
+  ok('counter cannot be set to 0', zeroStart.status === 400, `status ${zeroStart.status}`);
+  if (nb.body?.highest_used > 0) {
+    const reuse = await call('PUT', '/numbering', { next_number: nb.body.highest_used });
+    ok('counter cannot be set to a number already issued', reuse.status === 400, `status ${reuse.status}`);
+  }
+  // Setting it to where it already is changes nothing, but exercises the success path.
+  const same = await call('PUT', '/numbering', { next_number: nb.body?.next_number });
+  ok('counter accepts its current value', same.status === 200 && same.body?.next_number === nb.body?.next_number,
+    `status ${same.status}`);
 
   const prev = await call('POST', '/preview', {
     party_id: created.partyId,
@@ -144,15 +168,23 @@ async function main() {
   });
   ok('duplicate invoice number rejected with 409', dupe.status === 409, `status ${dupe.status}`);
 
-  // Server must ignore client-supplied totals and recompute
+  // Server must ignore client-supplied totals and recompute. This one also
+  // sends the suggested number, exactly as the form does, to prove the
+  // counter still moves on +1 when the number comes from the browser.
+  const suggested = (await call('GET', '/numbering')).body;
   const tampered = await call('POST', '/', {
     party_id: created.partyId,
+    invoice_no: suggested?.next_invoice_no,
     invoice_date: new Date().toISOString().slice(0, 10),
     total_amount: 1, subtotal: 1, taxable_amount: 1,
     items: [{ description: 'Tamper check', quantity: 1, rate: 1000, gst_rate: 18 }],
   });
   ok('server recomputes totals, ignoring client values',
     tampered.body?.total_amount === 1180, String(tampered.body?.total_amount));
+  const afterSuggested = (await call('GET', '/numbering')).body;
+  ok('saving the suggested number moves the counter on by 1',
+    afterSuggested?.next_number === suggested?.next_number + 1,
+    `${suggested?.next_number} -> ${afterSuggested?.next_number}`);
   if (tampered.body?.id) {
     await call('DELETE', `/${tampered.body.id}`);
   }
@@ -179,6 +211,9 @@ async function main() {
     `${pdfBuf.length} bytes, ${pdfRes.headers.get('content-type')}`);
   ok('PDF filename has no slash',
     !/filename="[^"]*\//.test(pdfRes.headers.get('content-disposition') || ''),
+    pdfRes.headers.get('content-disposition') || '');
+  ok('PDF filename is INVOICENO_PARTY_MON_BILL_YYYY',
+    /filename="[A-Z0-9-]+_E2E_[A-Z]{3}_BILL_\d{4}\.pdf"/.test(pdfRes.headers.get('content-disposition') || ''),
     pdfRes.headers.get('content-disposition') || '');
 
   const xlsRes = await fetch(`${API}/${created.invoiceId}/excel`, { headers: { Authorization: `Bearer ${token}` } });

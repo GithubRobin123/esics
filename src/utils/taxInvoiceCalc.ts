@@ -250,6 +250,55 @@ export function formatInvoiceNo(seq: number, when: Date = new Date()): string {
   return `EMS/${financialYear(when)}/${String(seq).padStart(5, '0')}`;
 }
 
+/**
+ * The running-counter part of an invoice number issued in financial year `fy`,
+ * e.g. ("EMS/2026-27/00042", "2026-27") -> 42. Null for any other shape —
+ * a hand-typed number like "INV-7" or one from a different year never moves
+ * the counter.
+ */
+export function invoiceSeqNumber(invoiceNo: string, fy: string): number | null {
+  const m = /^EMS\/(\d{4}-\d{2})\/(\d{1,12})$/.exec(String(invoiceNo ?? '').trim().toUpperCase());
+  if (!m || m[1] !== fy) return null;
+  return Number(m[2]);
+}
+
+// ─── Party billing rate ──────────────────────────────────────────────────────
+
+/** What a party's rate is charged per. */
+export const RATE_BASES = ['hawb', 'mawb', 'hbl'] as const;
+export type RateBasis = typeof RATE_BASES[number];
+
+export function isRateBasis(v: any): v is RateBasis {
+  return (RATE_BASES as readonly string[]).includes(v);
+}
+
+// ─── Download file name ──────────────────────────────────────────────────────
+
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+
+/** First word of a party name, e.g. "M/s. Navi Mumbai Logistics" -> "NAVI". */
+export function partyFirstName(name?: string | null): string {
+  const cleaned = String(name ?? '').toUpperCase().replace(/^\s*M\s*\/\s*S\b\.?\s*/, '');
+  const first = cleaned.trim().split(/\s+/)[0] || '';
+  return first.replace(/[^A-Z0-9]/g, '') || 'PARTY';
+}
+
+/**
+ * Download file name (without extension), all capitals:
+ *   <INVOICE NO>_<PARTY FIRST NAME>_<MON>_BILL_<YYYY>
+ *   e.g. EMS-2026-27-00042_NAVI_SEP_BILL_2026
+ *
+ * Month and year come from the invoice date. '/' and '_' inside the invoice
+ * number become '-', so '_' only ever separates the parts.
+ */
+export function invoiceFileBaseName(invoiceNo: string, partyName: string | null | undefined, invoiceDate: string): string {
+  const no = String(invoiceNo ?? '').toUpperCase().replace(/[^A-Z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'INVOICE';
+  const d = /^(\d{4})-(\d{2})-\d{2}/.exec(String(invoiceDate ?? ''));
+  const month = d ? MONTHS[Number(d[2]) - 1] ?? '' : '';
+  const year = d ? d[1] : '';
+  return [no, partyFirstName(partyName), month, 'BILL', year].filter(Boolean).join('_');
+}
+
 /** Validates an operator-supplied invoice number override. */
 export function normaliseInvoiceNo(raw: any): string {
   const s = String(raw ?? '').trim().toUpperCase();

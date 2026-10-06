@@ -10,6 +10,7 @@
  */
 
 import { Router, Response } from 'express';
+import type { PoolClient } from 'pg';
 import pool from '../db';
 import { authenticate, requireRole, AuthRequest } from '../middleware/auth';
 import { logger } from '../utils/logger';
@@ -18,6 +19,10 @@ import {
   resolveGstMode,
   normaliseInvoiceNo,
   formatInvoiceNo,
+  financialYear,
+  invoiceSeqNumber,
+  invoiceFileBaseName,
+  isRateBasis,
   buildPartySnapshot,
   round2,
   TaxInvoiceValidationError,
@@ -111,6 +116,7 @@ const INVOICE_NUM_FIELDS = [
   'igst_amount', 'round_off', 'total_amount', 'amount_paid', 'pending_amount',
 ];
 const ITEM_NUM_FIELDS = ['quantity', 'rate', 'gst_rate', 'amount', 'line_no'];
+const PARTY_NUM_FIELDS = ['rate'];
 
 function clampPage(q: any): { limit: number; offset: number; page: number; pageSize: number } {
   const page = Math.max(1, parseInt(String(q.page ?? '1'), 10) || 1);
@@ -137,7 +143,7 @@ router.get('/parties', async (req: AuthRequest, res: Response): Promise<void> =>
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     const r = await pool.query(`SELECT * FROM tax_invoice_parties ${whereSql} ORDER BY name ASC LIMIT 500`, params);
-    res.json(r.rows);
+    res.json(r.rows.map(row => numify(row, PARTY_NUM_FIELDS)));
   } catch (err) {
     fail(res, err, 'GET /parties');
   }
@@ -157,6 +163,20 @@ function readPartyBody(body: any) {
   // GSTIN when present so the two can never disagree.
   const state_code = gstin ? gstin.slice(0, 2) : String(body?.state_code ?? '').trim().slice(0, 2);
 
+  // Billing rate is optional, but a basis and a rate only make sense together.
+  const basisRaw = String(body?.rate_basis ?? '').trim().toLowerCase();
+  if (basisRaw && !isRateBasis(basisRaw)) {
+    throw new TaxInvoiceValidationError('Rate basis must be As per HAWB, As per MAWB or As per HBL.');
+  }
+  const rateRaw = body?.rate;
+  const hasRate = rateRaw !== null && rateRaw !== undefined && String(rateRaw).trim() !== '';
+  const rate = hasRate ? Number(rateRaw) : null;
+  if (rate !== null && (!Number.isFinite(rate) || rate < 0 || rate > 99_999_999.99)) {
+    throw new TaxInvoiceValidationError('Rate must be a number, 0 or more.');
+  }
+  if (basisRaw && rate === null) throw new TaxInvoiceValidationError('Enter the rate for the selected basis.');
+  if (!basisRaw && rate !== null) throw new TaxInvoiceValidationError('Pick a rate basis (As per HAWB / MAWB / HBL) for this rate.');
+
   return {
     name,
     gstin: gstin || null,
@@ -168,6 +188,8 @@ function readPartyBody(body: any) {
     pincode: String(body?.pincode ?? '').trim().slice(0, 10) || null,
     email: String(body?.email ?? '').trim().slice(0, 150) || null,
     phone: String(body?.phone ?? '').trim().slice(0, 30) || null,
+    rate_basis: basisRaw || null,
+    rate: rate === null ? null : round2(rate),
   };
 }
 
@@ -176,11 +198,13 @@ router.post('/parties', async (req: AuthRequest, res: Response): Promise<void> =
     const p = readPartyBody(req.body);
     const r = await pool.query(
       `INSERT INTO tax_invoice_parties
-         (name, gstin, address1, address2, city, state, state_code, pincode, email, phone, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [p.name, p.gstin, p.address1, p.address2, p.city, p.state, p.state_code, p.pincode, p.email, p.phone, req.user?.id]
+         (name, gstin, address1, address2, city, state, state_code, pincode, email, phone,
+          rate_basis, rate, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+      [p.name, p.gstin, p.address1, p.address2, p.city, p.state, p.state_code, p.pincode, p.email, p.phone,
+       p.rate_basis, p.rate, req.user?.id]
     );
-    res.status(201).json(r.rows[0]);
+    res.status(201).json(numify(r.rows[0], PARTY_NUM_FIELDS));
   } catch (err) {
     fail(res, err, 'POST /parties');
   }
@@ -192,12 +216,13 @@ router.put('/parties/:id', async (req: AuthRequest, res: Response): Promise<void
     const r = await pool.query(
       `UPDATE tax_invoice_parties SET
          name=$1, gstin=$2, address1=$3, address2=$4, city=$5, state=$6,
-         state_code=$7, pincode=$8, email=$9, phone=$10, updated_at=NOW()
-       WHERE id=$11 RETURNING *`,
-      [p.name, p.gstin, p.address1, p.address2, p.city, p.state, p.state_code, p.pincode, p.email, p.phone, req.params.id]
+         state_code=$7, pincode=$8, email=$9, phone=$10, rate_basis=$11, rate=$12, updated_at=NOW()
+       WHERE id=$13 RETURNING *`,
+      [p.name, p.gstin, p.address1, p.address2, p.city, p.state, p.state_code, p.pincode, p.email, p.phone,
+       p.rate_basis, p.rate, req.params.id]
     );
     if (!r.rows[0]) { res.status(404).json({ message: 'Party not found' }); return; }
-    res.json(r.rows[0]);
+    res.json(numify(r.rows[0], PARTY_NUM_FIELDS));
   } catch (err) {
     fail(res, err, 'PUT /parties/:id');
   }
@@ -221,12 +246,65 @@ router.delete('/parties/:id', async (req: AuthRequest, res: Response): Promise<v
 // Numbering + preview
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Peeks at the sequence WITHOUT consuming a value (preview must not burn numbers). */
-async function suggestInvoiceNo(): Promise<string> {
+/** Peeks at the counter WITHOUT consuming a value (preview must not burn numbers). */
+async function peekCounter(): Promise<number> {
   const r = await pool.query(`SELECT last_value, is_called FROM tax_invoice_no_seq`);
   const { last_value, is_called } = r.rows[0];
-  const next = is_called ? Number(last_value) + 1 : Number(last_value);
-  return formatInvoiceNo(next);
+  return is_called ? Number(last_value) + 1 : Number(last_value);
+}
+
+/** Highest counter value already printed on an invoice in financial year `fy` (0 if none). */
+async function highestUsedNumber(fy: string): Promise<number> {
+  const r = await pool.query(
+    `SELECT COALESCE(MAX(CAST(SUBSTRING(invoice_no FROM '^EMS/[0-9]{4}-[0-9]{2}/([0-9]{1,12})$') AS BIGINT)), 0) AS n
+     FROM tax_invoices WHERE invoice_no LIKE $1`,
+    [`EMS/${fy}/%`]
+  );
+  return Number(r.rows[0].n);
+}
+
+/**
+ * The number the next invoice should get: the counter, but never one already
+ * printed on an invoice this financial year. Invoices saved before the counter
+ * learned to advance on save never moved it, so without this such a database
+ * would keep suggesting a number that is already taken.
+ */
+async function nextFreeNumber(fromCounter?: number): Promise<number> {
+  const counter = fromCounter ?? await peekCounter();
+  return Math.max(counter, (await highestUsedNumber(financialYear(new Date()))) + 1);
+}
+
+async function suggestInvoiceNo(): Promise<string> {
+  return formatInvoiceNo(await nextFreeNumber());
+}
+
+async function numberingState() {
+  const fy = financialYear(new Date());
+  const next = await nextFreeNumber();
+  return {
+    financial_year: fy,
+    next_number: next,
+    next_invoice_no: formatInvoiceNo(next),
+    highest_used: await highestUsedNumber(fy),
+  };
+}
+
+/**
+ * Moves the counter past an invoice number that has just been saved, so the
+ * next suggestion is always +1. The form always sends the number it showed,
+ * so without this the counter would never move and every new invoice would be
+ * offered the same, already-taken number. Never moves the counter backwards —
+ * saving a lower hand-typed number leaves it where it is.
+ */
+async function advanceCounterPast(client: PoolClient, invoiceNo: string): Promise<void> {
+  const n = invoiceSeqNumber(invoiceNo, financialYear(new Date()));
+  if (n === null || n < 1) return;
+  await client.query(
+    `SELECT setval('tax_invoice_no_seq',
+       GREATEST($1::bigint, (SELECT CASE WHEN is_called THEN last_value ELSE last_value - 1 END FROM tax_invoice_no_seq)),
+       true)`,
+    [n]
+  );
 }
 
 router.get('/next-number', async (_req: AuthRequest, res: Response): Promise<void> => {
@@ -234,6 +312,45 @@ router.get('/next-number', async (_req: AuthRequest, res: Response): Promise<voi
     res.json({ invoice_no: await suggestInvoiceNo() });
   } catch (err) {
     fail(res, err, 'GET /next-number');
+  }
+});
+
+/** Where the invoice counter stands — shown next to the Invoice No. field. */
+router.get('/numbering', async (_req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    res.json(await numberingState());
+  } catch (err) {
+    fail(res, err, 'GET /numbering');
+  }
+});
+
+/**
+ * Sets the number the next invoice will get; each invoice after it is +1.
+ * Used when invoices were already issued elsewhere, so numbering carries on
+ * from there instead of starting at 1. Refuses a number already printed on an
+ * invoice this financial year, which would otherwise produce duplicates.
+ */
+router.put('/numbering', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const raw = String(req.body?.next_number ?? '').trim();
+    if (!/^\d{1,9}$/.test(raw) || Number(raw) < 1) {
+      throw new TaxInvoiceValidationError('Next invoice number must be a whole number, 1 or more.');
+    }
+    const next = Number(raw);
+
+    const fy = financialYear(new Date());
+    const highest = await highestUsedNumber(fy);
+    if (next <= highest) {
+      throw new TaxInvoiceValidationError(
+        `${formatInvoiceNo(highest)} has already been issued. The next number must be ${highest + 1} or higher.`
+      );
+    }
+
+    await pool.query(`SELECT setval('tax_invoice_no_seq', $1::bigint, false)`, [next]);
+    logger.info('TAX_INVOICE', `Invoice counter set to ${next} by ${req.user?.username ?? req.user?.id}`);
+    res.json(await numberingState());
+  } catch (err) {
+    fail(res, err, 'PUT /numbering');
   }
 });
 
@@ -401,10 +518,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const prepared = await prepareInvoice(req.body);
 
-    // Use the operator's override if given, else consume the next sequence value.
+    // Use the operator's number if given (the form always sends the one it
+    // suggested), else consume the next free counter value.
     const invoiceNo = req.body?.invoice_no
       ? normaliseInvoiceNo(req.body.invoice_no)
-      : formatInvoiceNo(Number((await client.query(`SELECT nextval('tax_invoice_no_seq') AS n`)).rows[0].n));
+      : formatInvoiceNo(await nextFreeNumber(
+          Number((await client.query(`SELECT nextval('tax_invoice_no_seq') AS n`)).rows[0].n)
+        ));
 
     await client.query('BEGIN');
 
@@ -434,6 +554,8 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
         [invoiceId, it.line_no, it.description, it.hsn_sac, it.quantity, it.unit, it.rate, it.gst_rate, it.amount]
       );
     }
+
+    await advanceCounterPast(client, invoiceNo);
 
     await client.query('COMMIT');
     res.status(201).json(await loadInvoice(invoiceId));
@@ -506,6 +628,8 @@ router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
         [req.params.id, it.line_no, it.description, it.hsn_sac, it.quantity, it.unit, it.rate, it.gst_rate, it.amount]
       );
     }
+
+    await advanceCounterPast(client, invoiceNo);
 
     await client.query('COMMIT');
     res.json(await loadInvoice(req.params.id));
@@ -642,8 +766,9 @@ router.delete('/:id/payments/:paymentId', async (req: AuthRequest, res: Response
 // Downloads
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Invoice numbers contain '/', which is illegal in a filename. */
-const safeName = (invoiceNo: string) => invoiceNo.replace(/[^A-Za-z0-9._-]/g, '-');
+/** e.g. EMS-2026-27-00042_NAVI_SEP_BILL_2026 — see invoiceFileBaseName. */
+const downloadName = (inv: PdfInvoice) =>
+  invoiceFileBaseName(inv.invoice_no, inv.party_snapshot?.name, inv.invoice_date);
 
 /** Rebuilds the GST slab summary from stored rows so PDF/Excel match the saved invoice. */
 function breakupFromItems(inv: any) {
@@ -696,7 +821,7 @@ router.get('/:id/pdf', async (req: AuthRequest, res: Response): Promise<void> =>
     const buf = await renderInvoicePdf(inv);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Length', String(buf.length));
-    res.setHeader('Content-Disposition', `attachment; filename="${safeName(inv.invoice_no)}.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName(inv)}.pdf"`);
     res.end(buf);
   } catch (err) {
     fail(res, err, 'GET /:id/pdf');
@@ -711,7 +836,7 @@ router.get('/:id/excel', async (req: AuthRequest, res: Response): Promise<void> 
     const buf = await renderInvoiceExcel(inv);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Length', String(buf.length));
-    res.setHeader('Content-Disposition', `attachment; filename="${safeName(inv.invoice_no)}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName(inv)}.xlsx"`);
     res.end(buf);
   } catch (err) {
     fail(res, err, 'GET /:id/excel');

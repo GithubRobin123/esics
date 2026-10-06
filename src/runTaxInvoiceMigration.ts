@@ -1,37 +1,40 @@
 /**
- * Applies schema_v8_tax_invoices.sql to the main application database.
+ * Applies the Tax Invoice migrations to the main application database, in order.
  *
  *   npm run migrate:tax-invoice
  *
- * The migration is fully idempotent (every statement is IF NOT EXISTS), so
- * re-running it is safe. It only CREATEs new `tax_invoice*` objects — it never
- * alters or drops anything belonging to the existing air system.
+ * Every migration is fully idempotent (IF NOT EXISTS / guarded), so re-running
+ * is safe. They only create or extend `tax_invoice*` objects — never alter or
+ * drop anything belonging to the existing air system.
  */
 
 import fs from 'fs';
 import path from 'path';
 import pool from './db';
 
-const FILE = 'schema_v8_tax_invoices.sql';
+const FILES = [
+  'schema_v8_tax_invoices.sql',
+  'schema_v9_tax_invoice_party_rates.sql',
+];
 
-function resolveSqlPath(): string {
+function resolveSqlPath(file: string): string {
   // Works both under ts-node (src/) and from a compiled dist/ build.
   const candidates = [
-    path.join(__dirname, FILE),
-    path.join(__dirname, '..', 'src', FILE),
-    path.join(process.cwd(), 'src', FILE),
+    path.join(__dirname, file),
+    path.join(__dirname, '..', 'src', file),
+    path.join(process.cwd(), 'src', file),
   ];
   for (const p of candidates) if (fs.existsSync(p)) return p;
-  throw new Error(`Could not find ${FILE}. Looked in:\n  ${candidates.join('\n  ')}`);
+  throw new Error(`Could not find ${file}. Looked in:\n  ${candidates.join('\n  ')}`);
 }
 
 async function main(): Promise<void> {
-  const sqlPath = resolveSqlPath();
-  console.log(`Applying ${sqlPath}`);
-
-  const sql = fs.readFileSync(sqlPath, 'utf8');
-  await pool.query(sql);
-  console.log('Migration applied.\n');
+  for (const file of FILES) {
+    const sqlPath = resolveSqlPath(file);
+    console.log(`Applying ${sqlPath}`);
+    await pool.query(fs.readFileSync(sqlPath, 'utf8'));
+  }
+  console.log('Migrations applied.\n');
 
   const tables = await pool.query(
     `SELECT table_name FROM information_schema.tables
@@ -46,6 +49,14 @@ async function main(): Promise<void> {
      WHERE schemaname = 'public' AND sequencename = 'tax_invoice_no_seq'`
   );
   console.log(`Sequence tax_invoice_no_seq: ${seq.rowCount ? 'present' : 'MISSING'}`);
+
+  const rateCols = await pool.query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'tax_invoice_parties'
+       AND column_name IN ('rate_basis', 'rate')
+     ORDER BY column_name`
+  );
+  console.log(`Party rate columns: ${rateCols.rows.map(r => r.column_name).join(', ') || 'MISSING'}`);
 
   // Confirm the pre-existing air tables are untouched and still readable.
   const untouched = await pool.query(

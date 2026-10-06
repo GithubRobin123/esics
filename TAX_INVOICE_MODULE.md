@@ -24,7 +24,8 @@ and SAC details), which is imported read-only.
 # 1. Install (adds pdfkit + exceljs)
 npm install
 
-# 2. Create the tables — idempotent, safe to re-run
+# 2. Create / extend the tables — applies schema_v8 then schema_v9 (party
+#    billing rates). Idempotent, safe to re-run.
 npm run migrate:tax-invoice
 
 # 3. Unit checks: GST maths, rounding, validation, PDF/Excel rendering
@@ -38,6 +39,9 @@ party and invoice, drives every endpoint, and deletes everything it made:
 # with the backend running on :5099
 BASE_URL=http://localhost:5099 npx ts-node --transpile-only src/taxInvoiceE2E.ts
 ```
+
+The E2E run creates real invoices, so it uses up two invoice numbers each
+time it runs. Run it against a test database, not production.
 
 ## Access control
 
@@ -75,12 +79,44 @@ to make the on-screen preview instant — keep the two algorithms in step.
   otherwise serialises to JSON as a UTC timestamp and shifts the calendar day
   by one. Date formatters parse the string textually for the same reason.
 
+## Party billing rate
+
+A party can carry one rate and the basis it is charged on: **As per HAWB**,
+**As per MAWB** or **As per HBL** (`rate_basis` = `hawb` / `mawb` / `hbl`,
+plus `rate`). Both are optional, but must be set together.
+
+Picking the party on the New Invoice form fills a line with the party's rate,
+unit (`HAWB` / `MAWB` / `HBL`), a default description and SAC 998439. The
+quantity is left empty on purpose: it is the number of HAWB/MAWB/HBL being
+billed and is entered on every invoice. The rate on the line can be changed
+for that one invoice without touching the party; change the party itself to
+change the default. Opening an existing invoice for edit never re-applies the
+rate. Use **Apply party rate** to pull it in again by hand.
+
 ## Invoice numbers
 
 Format `EMS/<financial-year>/<00001>`, e.g. `EMS/2026-27/00042`. Auto-suggested
 from `tax_invoice_no_seq` and editable before saving. The suggestion endpoint
 peeks without consuming, so previewing never burns numbers. A duplicate number
 returns 409 rather than overwriting anything.
+
+**Running counter.** Saving an invoice whose number has the current year's
+`EMS/<FY>/<n>` shape moves the counter past `n`, so the next suggestion is
+always +1. It never moves backwards, and other number shapes leave it alone.
+The suggestion also skips any number already printed this financial year.
+
+**Starting number.** When invoices were already issued elsewhere, set where
+numbering continues from with **Change starting number** under the Invoice No.
+field on New Invoice (`PUT /numbering`). It must be above the highest number
+already issued this financial year, so it can't create duplicates.
+
+## Download file names
+
+`<INVOICE NO>_<PARTY FIRST NAME>_<MON>_BILL_<YYYY>`, all capitals, e.g.
+`EMS-2026-27-00042_NAVI_SEP_BILL_2026.pdf`. Month and year come from the
+invoice date. `/` in the invoice number becomes `-`, and a leading `M/s.` on
+the party name is skipped. The server (`Content-Disposition`) and the browser
+(`taxInvoiceCalc.ts`) build the same name; keep the two helpers in step.
 
 ## Endpoints
 
@@ -92,6 +128,8 @@ All under `/api/tax-invoices`.
 | POST/PUT | `/parties`, `/parties/:id` | Create / update a party |
 | DELETE | `/parties/:id` | Deactivate (soft) |
 | GET | `/next-number` | Suggested invoice number |
+| GET | `/numbering` | Counter state: next number, highest issued this FY |
+| PUT | `/numbering` | Set the next invoice number (`{ next_number }`) |
 | POST | `/preview` | Totals without saving |
 | GET | `/` | List (`search, party_id, created_by, status, from_date, to_date, page, pageSize`) |
 | GET/POST/PUT | `/`, `/:id` | Read / create / update |

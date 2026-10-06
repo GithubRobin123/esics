@@ -2,7 +2,10 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { computeTaxInvoice, resolveGstMode, formatInvoiceNo, financialYear, round2 } from './utils/taxInvoiceCalc';
+import {
+  computeTaxInvoice, resolveGstMode, formatInvoiceNo, financialYear, round2,
+  invoiceSeqNumber, invoiceFileBaseName, partyFirstName, isRateBasis,
+} from './utils/taxInvoiceCalc';
 import { renderInvoicePdf } from './utils/taxInvoicePdf';
 import { renderInvoiceExcel } from './utils/taxInvoiceExcel';
 
@@ -87,6 +90,32 @@ check('FY in September', financialYear(new Date('2026-09-29')), '2026-27');
 check('FY in February', financialYear(new Date('2027-02-10')), '2026-27');
 check('FY on 1 April', financialYear(new Date('2027-04-01')), '2027-28');
 check('formatted', formatInvoiceNo(42, new Date('2026-09-29')), 'EMS/2026-27/00042');
+check('counter read back from own number', invoiceSeqNumber('EMS/2026-27/00042', '2026-27'), 42);
+check('counter read past 5 digits', invoiceSeqNumber('EMS/2026-27/123456', '2026-27'), 123456);
+check('lower-case number still read', invoiceSeqNumber('ems/2026-27/00007', '2026-27'), 7);
+check('other financial year ignored', invoiceSeqNumber('EMS/2025-26/00042', '2026-27'), null);
+check('hand-typed format ignored', invoiceSeqNumber('INV-42', '2026-27'), null);
+
+console.log('\n--- Party rate basis ---');
+check('hawb allowed', isRateBasis('hawb'), true);
+check('mawb allowed', isRateBasis('mawb'), true);
+check('hbl allowed', isRateBasis('hbl'), true);
+check('monthly rejected', isRateBasis('monthly'), false);
+check('upper case rejected (server lower-cases first)', isRateBasis('HAWB'), false);
+
+console.log('\n--- Download file name ---');
+check('standard', invoiceFileBaseName('EMS/2026-27/00042', 'Navi Mumbai Logistics Pvt Ltd', '2026-09-29'),
+  'EMS-2026-27-00042_NAVI_SEP_BILL_2026');
+check('october', invoiceFileBaseName('EMS/2026-27/00043', 'acme cargo', '2026-10-01'),
+  'EMS-2026-27-00043_ACME_OCT_BILL_2026');
+check('underscore in number becomes hyphen', invoiceFileBaseName('INV_7', 'Acme', '2027-01-15'),
+  'INV-7_ACME_JAN_BILL_2027');
+check('M/s. prefix skipped', partyFirstName('M/s. Blue Dart Express'), 'BLUE');
+check('M/S without dot skipped', partyFirstName('M/S SKYLINE AIR'), 'SKYLINE');
+check('punctuation stripped', partyFirstName('A.B.C. Freight'), 'ABC');
+check('blank name falls back', partyFirstName('   '), 'PARTY');
+check('missing date still gives a name', invoiceFileBaseName('EMS/2026-27/00001', 'Acme', ''),
+  'EMS-2026-27-00001_ACME_BILL');
 
 // ─── Renderers ───────────────────────────────────────────────────────────────
 (async () => {

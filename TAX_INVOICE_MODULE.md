@@ -118,6 +118,24 @@ invoice date. `/` in the invoice number becomes `-`, and a leading `M/s.` on
 the party name is skipped. The server (`Content-Disposition`) and the browser
 (`taxInvoiceCalc.ts`) build the same name; keep the two helpers in step.
 
+## PDF and Excel layout
+
+Both downloads follow the Tally invoice layout the parties already receive. The
+whole invoice sits in one ruled frame. Boxed cells hold the supplier, the buyer
+and the reference fields (Invoice No., Dated, Delivery Note, …). The item table
+has the columns Sl No. / Description of Goods / Quantity / Rate / per / Amount,
+with the SAC code printed under each description. Under the items come
+`LESS : DISCOUNT`, one `OUTPUT IGST n%` line per GST slab (or `OUTPUT CGST` and
+`OUTPUT SGST` at half rate each) and `ROUND OFF`. The column rules continue
+down through an empty gap to the Total row. Below that are the amount in words,
+a GST slab summary when the rates differ, the remarks (notes and bank details),
+the declaration and the signature box.
+
+`ledgerLines` and `totalQuantity` in `utils/taxInvoicePdf.ts` decide those
+lines for both renderers, so the PDF and the Excel always agree. A long PDF
+continues on further pages, and the Total row and footer stay together. The
+Excel sheet hides gridlines, so only the boxes show.
+
 ## Endpoints
 
 All under `/api/tax-invoices`.

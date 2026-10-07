@@ -6,7 +6,7 @@ import {
   computeTaxInvoice, resolveGstMode, formatInvoiceNo, financialYear, round2,
   invoiceSeqNumber, invoiceFileBaseName, partyFirstName, isRateBasis,
 } from './utils/taxInvoiceCalc';
-import { renderInvoicePdf } from './utils/taxInvoicePdf';
+import { renderInvoicePdf, ledgerLines, totalQuantity } from './utils/taxInvoicePdf';
 import { renderInvoiceExcel } from './utils/taxInvoiceExcel';
 
 let failures = 0;
@@ -116,6 +116,20 @@ check('punctuation stripped', partyFirstName('A.B.C. Freight'), 'ABC');
 check('blank name falls back', partyFirstName('   '), 'PARTY');
 check('missing date still gives a name', invoiceFileBaseName('EMS/2026-27/00001', 'Acme', ''),
   'EMS-2026-27-00001_ACME_BILL');
+
+console.log('\n--- Tally-style lines under the items ---');
+const bAsInv = { ...b, gst_mode: 'cgst_sgst' as const, breakup: b.breakup } as any;
+check('intra: CGST/SGST at half rate, then round off',
+  ledgerLines(bAsInv).map(l => `${l.label}=${l.amount}`),
+  ['OUTPUT CGST 9%=90', 'OUTPUT SGST 9%=90', 'ROUND OFF=0']);
+check('multi-slab IGST with discount',
+  ledgerLines({ ...d, gst_mode: 'igst', breakup: d.breakup } as any).map(l => l.label),
+  ['LESS : DISCOUNT', 'OUTPUT IGST 18%', 'OUTPUT IGST 5%', 'ROUND OFF']);
+check('discount printed as a negative', ledgerLines({ ...d, gst_mode: 'igst', breakup: d.breakup } as any)[0].amount, -150);
+check('total quantity when units match',
+  totalQuantity({ items: [{ quantity: 8, unit: 'HBL' }, { quantity: 2, unit: 'hbl' }] } as any), { quantity: 10, unit: 'HBL' });
+check('no total quantity for mixed units',
+  totalQuantity({ items: [{ quantity: 8, unit: 'HBL' }, { quantity: 2, unit: 'MAWB' }] } as any), null);
 
 // ─── Renderers ───────────────────────────────────────────────────────────────
 (async () => {

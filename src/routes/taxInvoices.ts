@@ -248,9 +248,10 @@ router.delete('/parties/:id', async (req: AuthRequest, res: Response): Promise<v
 
 /** Peeks at the counter WITHOUT consuming a value (preview must not burn numbers). */
 async function peekCounter(): Promise<number> {
-  const r = await pool.query(`SELECT last_value, is_called FROM tax_invoice_no_seq`);
+  const r = await pool.query(`SELECT COALESCE(MAX(invoice_no::BIGINT), 0) + 1 AS last_value
+FROM public.tax_invoices;`);
   const { last_value, is_called } = r.rows[0];
-  return is_called ? Number(last_value) + 1 : Number(last_value);
+  return  Number(last_value)
 }
 
 /** Highest counter value already printed on an invoice in financial year `fy` (0 if none). */
@@ -300,9 +301,8 @@ async function advanceCounterPast(client: PoolClient, invoiceNo: string): Promis
   const n = invoiceSeqNumber(invoiceNo, financialYear(new Date()));
   if (n === null || n < 1) return;
   await client.query(
-    `SELECT setval('tax_invoice_no_seq',
-       GREATEST($1::bigint, (SELECT CASE WHEN is_called THEN last_value ELSE last_value - 1 END FROM tax_invoice_no_seq)),
-       true)`,
+    `SELECT COALESCE(MAX(invoice_no::BIGINT), 0) + 1 AS next_invoice_no
+      FROM public.tax_invoices; `,
     [n]
   );
 }

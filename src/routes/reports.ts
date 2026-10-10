@@ -507,7 +507,7 @@ async function computeAirInvoice(userId: string, fromDate: string, toDate: strin
       [userId, fromDate, toDateEnd]
     );
     quantity = parseInt(r.rows[0].count);
-    description = 'AIR CONSOL MANIFEST (HBL)';
+    description = 'SEA CONSOL MANIFEST (HBL)';
   }
 
   const gstRate = Number(profile.gst_rate ?? 18);

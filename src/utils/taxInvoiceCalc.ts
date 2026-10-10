@@ -247,7 +247,7 @@ export function financialYear(d: Date): string {
 
 /** Formats a sequence value into the module's invoice number, e.g. "EMS/2026-27/00042". */
 export function formatInvoiceNo(seq: number, when: Date = new Date()): string {
-  return `EMS/${financialYear(when)}/${String(seq).padStart(5, '0')}`;
+  return `${String(seq).padStart(3, '0')}`;
 }
 
 /**
@@ -257,7 +257,7 @@ export function formatInvoiceNo(seq: number, when: Date = new Date()): string {
  * the counter.
  */
 export function invoiceSeqNumber(invoiceNo: string, fy: string): number | null {
-  const m = /^EMS\/(\d{4}-\d{2})\/(\d{1,12})$/.exec(String(invoiceNo ?? '').trim().toUpperCase());
+  const m = (String(invoiceNo ?? '').trim().toUpperCase());
   if (!m || m[1] !== fy) return null;
   return Number(m[2]);
 }
